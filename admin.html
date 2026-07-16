@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RedRace · Редактор версия</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="redrace-widget">
+
+    <!-- ===== Шапка ===== -->
+    <header class="widget-header">
+        <div class="logo">🏎️ Red<span>Race</span></div>
+        <div class="user-info">
+            <div class="user-avatar">K</div>
+            <div class="user-name">
+                <strong>Kimi</strong><br>
+                <span style="font-size:12px; color:#666;">главный редактор</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- ===== Тело ===== -->
+    <div class="widget-body">
+
+        <!-- RSS-источник -->
+        <div class="input-group">
+            <label>📡 RSS-источник</label>
+            <div class="rss-row">
+                <input type="url" id="rssUrl" placeholder="https://example.com/feed.rss">
+                <button class="btn btn-secondary" id="fetchRssBtn">Загрузить</button>
+            </div>
+        </div>
+
+        <!-- Заголовок -->
+        <div class="input-group">
+            <label>📰 Заголовок</label>
+            <input type="text" id="postTitle" placeholder="Например: Хэмилтон выиграл Гран-при">
+        </div>
+
+        <!-- Текст поста -->
+        <div class="input-group">
+            <label>✍️ Текст новости</label>
+            <textarea id="postContent" placeholder="Введите текст новости..."></textarea>
+        </div>
+
+        <!-- Теги -->
+        <div class="input-group">
+            <label>🏷️ Теги</label>
+            <input type="text" id="postTags" placeholder="F1, Гран-при, Mercedes">
+            <span class="hint">Разделяйте теги запятыми</span>
+        </div>
+
+        <!-- Предпросмотр -->
+        <div class="preview-box">
+            <h3>👁️ Предпросмотр</h3>
+            <div class="post-preview" id="previewArea">
+                <span class="empty">Здесь будет отображаться ваш пост...</span>
+            </div>
+        </div>
+
+        <!-- Кнопка отправки -->
+        <button class="btn btn-primary btn-block" id="sendToBotBtn">
+            📤 Отправить в Telegram
+        </button>
+
+    </div>
+
+    <!-- ===== Футер (статус) ===== -->
+    <footer class="widget-footer">
+        <div class="status">
+            <span class="dot green"></span>
+            <span id="statusText">Готов к работе</span>
+        </div>
+        <span class="version">RedRace v1.0</span>
+    </footer>
+
+</div>
+
+<!-- ============================================================ -->
+<!-- JavaScript (логика) -->
+<script>
+    (function() {
+
+        // Элементы
+        const titleInput = document.getElementById('postTitle');
+        const contentInput = document.getElementById('postContent');
+        const tagsInput = document.getElementById('postTags');
+        const previewArea = document.getElementById('previewArea');
+        const statusText = document.getElementById('statusText');
+        const sendBtn = document.getElementById('sendToBotBtn');
+        const fetchRssBtn = document.getElementById('fetchRssBtn');
+        const rssUrlInput = document.getElementById('rssUrl');
+
+        // Обновление предпросмотра в реальном времени
+        function updatePreview() {
+            const title = titleInput.value.trim() || 'Без заголовка';
+            const content = contentInput.value.trim() || 'Текст новости...';
+            const tags = tagsInput.value.trim() || '';
+
+            previewArea.innerHTML = `
+                <strong style="color:#c62828;">${escapeHtml(title)}</strong><br>
+                ${escapeHtml(content)}
+                ${tags ? `<br><span style="color:#666;font-size:13px;">🏷️ ${escapeHtml(tags)}</span>` : ''}
+            `;
+        }
+
+        // Простая защита от XSS (минимальная)
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Установка статуса
+        function setStatus(text, type = 'info') {
+            statusText.textContent = text;
+            const dot = document.querySelector('.widget-footer .dot');
+            if (dot) {
+                dot.className = 'dot';
+                if (type === 'success') dot.classList.add('green');
+                else if (type === 'error') dot.classList.add('red');
+                else if (type === 'loading') dot.classList.add('yellow');
+                else dot.classList.add('green');
+            }
+        }
+
+        // Отправка поста в бота
+        async function sendPost() {
+            const title = titleInput.value.trim();
+            const content = contentInput.value.trim();
+            const tags = tagsInput.value.trim();
+
+            if (!title || !content) {
+                setStatus('⚠️ Заполните заголовок и текст поста', 'error');
+                return;
+            }
+
+            setStatus('⏳ Отправка...', 'loading');
+            sendBtn.disabled = true;
+
+            try {
+                // Имитация отправки (замени на реальный fetch)
+                await new Promise(resolve => setTimeout(resolve, 1200));
+                // В реальном проекте:
+                // const res = await fetch('/api/posts', {
+                //     method: 'POST',
+                //     headers: { 'Content-Type': 'application/json' },
+                //     body: JSON.stringify({ title, content, tags })
+                // });
+                // if (!res.ok) throw new Error('Ошибка сервера');
+
+                setStatus('✅ Пост отправлен в Telegram!', 'success');
+                // Очистка полей (опционально)
+                // contentInput.value = '';
+                // titleInput.value = '';
+                // updatePreview();
+
+            } catch (err) {
+                setStatus('❌ Ошибка: ' + err.message, 'error');
+            } finally {
+                sendBtn.disabled = false;
+            }
+        }
+
+        // Загрузка из RSS (заглушка)
+        async function fetchRss() {
+            const url = rssUrlInput.value.trim();
+            if (!url) {
+                setStatus('⚠️ Введите ссылку на RSS', 'error');
+                return;
+            }
+
+            setStatus('⏳ Загрузка RSS...', 'loading');
+
+            try {
+                // Имитация загрузки
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                // В реальном проекте:
+                // const res = await fetch('/api/rss?url=' + encodeURIComponent(url));
+                // const data = await res.json();
+                // titleInput.value = data.title || '';
+                // contentInput.value = data.content || '';
+                // updatePreview();
+
+                // Заглушка:
+                titleInput.value = 'Новость из RSS';
+                contentInput.value = 'Содержимое новости, загруженное из RSS-потока.';
+                updatePreview();
+                setStatus('✅ RSS загружен', 'success');
+
+            } catch (err) {
+                setStatus('❌ Ошибка RSS: ' + err.message, 'error');
+            }
+        }
+
+        // События
+        titleInput.addEventListener('input', updatePreview);
+        contentInput.addEventListener('input', updatePreview);
+        tagsInput.addEventListener('input', updatePreview);
+        sendBtn.addEventListener('click', sendPost);
+        fetchRssBtn.addEventListener('click', fetchRss);
+
+        // Первоначальный предпросмотр
+        updatePreview();
+        setStatus('Готов к работе', 'success');
+
+    })();
+</script>
+
+</body>
+  </html>
