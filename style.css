@@ -1,8 +1,13 @@
 /* ============================================================
    RedRace Redactor — Гоночный стиль
    Цвета: чёрный, красный, белый, серый
+   Шрифты: Inter + Teko (гоночный акцент)
    ============================================================ */
 
+/* ----- Подключение шрифтов ----- */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&family=Teko:wght@400;600;700&display=swap');
+
+/* ----- Сброс и база ----- */
 * {
     margin: 0;
     padding: 0;
@@ -11,7 +16,7 @@
 
 body {
     background: #0a0a0a;
-    font-family: 'Segoe UI', 'Inter', system-ui, -apple-system, sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     color: #f5f5f5;
     display: flex;
     justify-content: center;
@@ -20,8 +25,25 @@ body {
     padding: 20px;
 }
 
+/* ----- Текстура гоночного полотна (асфальт) ----- */
+body::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-image: 
+        radial-gradient(circle at 20% 50%, rgba(255, 255, 255, 0.015) 0%, transparent 50%),
+        radial-gradient(circle at 80% 50%, rgba(255, 255, 255, 0.015) 0%, transparent 50%);
+    pointer-events: none;
+    z-index: 0;
+}
+
 /* ----- Основной виджет (карточка) ----- */
 .redrace-widget {
+    position: relative;
+    z-index: 1;
     width: 100%;
     max-width: 820px;
     background: #141414;
@@ -44,8 +66,9 @@ body {
 }
 
 .login-box .logo-big {
-    font-size: 48px;
-    font-weight: 900;
+    font-family: 'Teko', sans-serif;
+    font-size: 52px;
+    font-weight: 700;
     color: #c62828;
     letter-spacing: 4px;
     margin-bottom: 8px;
@@ -68,7 +91,7 @@ body {
     text-align: left;
 }
 
-/* ----- Шапка виджета ----- */
+/* ===== Шапка виджета ===== */
 .widget-header {
     display: flex;
     justify-content: space-between;
@@ -79,8 +102,9 @@ body {
 }
 
 .logo {
-    font-size: 28px;
-    font-weight: 900;
+    font-family: 'Teko', sans-serif;
+    font-size: 32px;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 2px;
     color: #c62828;
@@ -122,14 +146,14 @@ body {
     font-weight: 600;
 }
 
-/* ----- Тело виджета ----- */
+/* ===== Тело виджета ===== */
 .widget-body {
     display: flex;
     flex-direction: column;
     gap: 22px;
 }
 
-/* Группа полей */
+/* ----- Группа полей ----- */
 .input-group {
     display: flex;
     flex-direction: column;
@@ -153,7 +177,7 @@ body {
     padding: 14px 18px;
     color: #f5f5f5;
     font-size: 15px;
-    font-family: inherit;
+    font-family: 'Inter', sans-serif;
     transition: border-color 0.3s, box-shadow 0.3s;
     outline: none;
 }
@@ -176,7 +200,7 @@ body {
     margin-top: 2px;
 }
 
-/* ---- Рядом с кнопкой "Загрузить RSS" ---- */
+/* ----- Рядом с кнопкой "Загрузить RSS" ----- */
 .rss-row {
     display: flex;
     gap: 12px;
@@ -186,7 +210,7 @@ body {
     flex: 1;
 }
 
-/* ----- Кнопки ----- */
+/* ===== Кнопки ===== */
 .btn {
     padding: 12px 28px;
     border: none;
@@ -200,7 +224,7 @@ body {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    font-family: inherit;
+    font-family: 'Inter', sans-serif;
 }
 
 .btn-primary {
@@ -240,7 +264,7 @@ body {
     justify-content: center;
 }
 
-/* ----- Предпросмотр ----- */
+/* ===== Предпросмотр ===== */
 .preview-box {
     background: #0f0f0f;
     border: 1px solid #222;
@@ -273,7 +297,7 @@ body {
     font-style: italic;
 }
 
-/* ----- Статус-бар ----- */
+/* ===== Статус-бар ===== */
 .widget-footer {
     display: flex;
     justify-content: space-between;
@@ -310,9 +334,35 @@ body {
     background: #f9a825;
 }
 
+/* ----- Пульсирующий индикатор (как телеметрия) ----- */
+@keyframes pulse {
+    0% { opacity: 0.4; transform: scale(0.95); }
+    50% { opacity: 1; transform: scale(1.1); }
+    100% { opacity: 0.4; transform: scale(0.95); }
+}
+
+.widget-footer .status .dot.active {
+    animation: pulse 1.2s ease-in-out infinite;
+}
+
 .widget-footer .version {
     font-size: 12px;
     color: #333;
+}
+
+/* ===== Кастомный скролл в стиле RedRace ===== */
+::-webkit-scrollbar {
+    width: 8px;
+}
+::-webkit-scrollbar-track {
+    background: #1a1a1a;
+}
+::-webkit-scrollbar-thumb {
+    background: #c62828;
+    border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #e63946;
 }
 
 /* ===== Адаптивность ===== */
@@ -335,4 +385,4 @@ body {
         width: 100%;
         justify-content: center;
     }
-}
+   }
