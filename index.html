@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RedRace · Вход</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="redrace-widget login-box">
+
+    <div class="logo-big">🏎️ Red<span>Race</span></div>
+    <div class="subtitle">вход в редакторскую панель</div>
+
+    <form id="loginForm">
+        <div class="input-group">
+            <label>👤 Логин</label>
+            <input type="text" id="loginUsername" placeholder="Введите логин" required>
+        </div>
+
+        <div class="input-group">
+            <label>🔒 Пароль</label>
+            <input type="password" id="loginPassword" placeholder="Введите пароль" required>
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-block">Войти</button>
+    </form>
+
+    <div style="margin-top: 16px; font-size:13px; color:#444;">
+        <span id="loginStatus"></span>
+    </div>
+
+</div>
+
+<script src="js/auth.js"></script>
+</body>
+</html>
