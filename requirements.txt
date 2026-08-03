@@ -6,4 +6,5 @@ httpx==0.28.1
 python-dotenv==1.0.1
 aiofiles==24.1.0
 openai==1.65.5
-news-fetch==0.1.0
+newsfetch==0.1.0
+aiohttp==3.9.5
