@@ -3,26 +3,33 @@ import logging
 import os
 import re
 from datetime import datetime
-
 import feedparser
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
-import httpx
+
+# Готовая библиотека для новостей
+# pip install f1-blog-pipeline
+try:
+    from f1_blog_pipeline import RSSReader, PostGenerator
+    USE_PIPELINE = True
+except ImportError:
+    USE_PIPELINE = False
+    logging.warning("f1-blog-pipeline не установлена, используем встроенный RSS-парсер")
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
+
+# AI-ключи (без Ofox)
+AGNES_API_KEY = os.getenv("AGNES_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,148 +37,160 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-openai_client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
-)
+# ========== AI-РОУТЕР (Agnes AI → OpenRouter) ==========
+class AIRouter:
+    def __init__(self):
+        self.providers = []
+        
+        if AGNES_API_KEY:
+            self.providers.append({
+                "name": "Agnes AI",
+                "client": AsyncOpenAI(base_url="https://api.agnes.ai/v1", api_key=AGNES_API_KEY),
+                "model": "agnes-2.5-flash"
+            })
+        if OPENROUTER_API_KEY:
+            self.providers.append({
+                "name": "OpenRouter",
+                "client": AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY),
+                "model": "openrouter/free"
+            })
+    
+    async def call(self, prompt, system_prompt, max_tokens=300):
+        for provider in self.providers:
+            try:
+                response = await provider["client"].chat.completions.create(
+                    model=provider["model"],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=max_tokens,
+                    timeout=20.0
+                )
+                result = response.choices[0].message.content
+                logger.info(f"✅ {provider['name']} ответил")
+                return result
+            except Exception as e:
+                logger.warning(f"⚠️ {provider['name']} не ответил: {e}")
+                continue
+        return None
 
-# ========== СИСТЕМНЫЙ ПРОМПТ ==========
-SYSTEM_PROMPT = """Ты — Нико, редактор новостей и голос канала RedRace.
+ai = AIRouter()
 
-Твоя задача — делать новости Формулы-1 живыми, точными и увлекательными для фанатов.
-
-🔹 Стиль:
-— Пиши как комментатор: коротко, ёмко, с драйвом.
-— Используй эмодзи 🏎️🔥🏁, но не перебарщивай (1–2 на пост).
-— Без воды. Только факты и контекст.
-— Если новость техническая — объясни простыми словами.
-
-🔹 Тон:
-— Дружелюбный, но уважительный.
-— Без излишнего пафоса. Без политики.
-— Если шутка — уместная, лёгкая.
-
-🔹 Формат поста:
-— Заголовок: ёмкий, кликбейтный, но честный.
-— Основной текст: 3–5 предложений, суть.
-— В конце: ссылка на источник (если есть).
-
-🔹 Запрещено:
-— Маркдаун, звёздочки, подчёркивания.
-— Спекуляции без подтверждения.
-— Оскорбления пилотов, команд или болельщиков.
-
-Ты — голос RedRace. Создан командой P4/9. Твои тексты читают тысячи фанатов. Будь профессионалом."""
-
-# ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
-pending_posts = {}
-CURRENT_MODEL = "openrouter/free"
-
-AVAILABLE_MODELS = {
-    "openrouter/free": "🚀 Авто (OpenRouter)",
-    "nvidia/nemotron-3-ultra:free": "🧠 Nemotron Ultra",
-    "deepseek/deepseek-r1:free": "🤖 DeepSeek R1",
-    "qwen/qwen-3-7b:free": "🐉 Qwen 3",
-    "google/gemini-2.0-flash-thinking:free": "⚡ Gemini Flash",
-}
-
-# ========== ТОЛЬКО РУССКИЕ АВТОСПОРТИВНЫЕ ИСТОЧНИКИ ==========
+# ========== НОВОСТНОЙ ДВИЖОК ==========
 RSS_SOURCES = [
-    "https://autosport.com.ru/rss",                # Autosport.com.ru — главный русский автоспорт
-    "https://www.f1news.ru/export/news.xml",       # F1News.ru (если работает)
-    "https://www.championat.com/rss/news/auto.xml",# Чемпионат.com — автоспорт
+    "https://autosport.com.ru/rss",
+    "https://www.f1news.ru/export/news.xml",
+    "https://www.championat.com/rss/news/auto.xml",
 ]
 
-scheduler = AsyncIOScheduler(timezone="UTC")
-
-class EditPost(StatesGroup):
-    waiting_for_text = State()
-
-# ========== ХЕЛПЕРЫ ==========
-def clean_html(text):
-    return re.sub(r'<[^>]+>', '', text)
-
-def format_post(entry):
-    title = clean_html(entry.title)
-    summary = clean_html(entry.summary[:500] + "..." if len(entry.summary) > 500 else entry.summary)
-    link = entry.link
-    return f"<b>{title}</b>\n\n{summary}\n\n<a href='{link}'>Читать полностью</a>"
-
-def get_buttons(post_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"publish_{post_id}"),
-         InlineKeyboardButton(text="✏️ Рерайт", callback_data=f"rewrite_{post_id}")],
-        [InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip_{post_id}")]
-    ])
-
-def get_model_buttons():
-    buttons = []
-    for model_id, label in AVAILABLE_MODELS.items():
-        is_current = model_id == CURRENT_MODEL
-        text = f"{'✅ ' if is_current else ''}{label}"
-        buttons.append([InlineKeyboardButton(text=text, callback_data=f"setmodel_{model_id}")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-# ========== ПАРСИНГ ==========
-async def fetch_all_feeds():
-    news = []
-    for url in RSS_SOURCES:
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url)
-                if response.status_code != 200:
-                    continue
-                feed = feedparser.parse(response.text)
+if USE_PIPELINE:
+    # Используем готовую библиотеку
+    rss_reader = RSSReader()
+    post_gen = PostGenerator(ai_client=ai)
+    
+    async def fetch_news():
+        posts = []
+        for url in RSS_SOURCES:
+            try:
+                items = rss_reader.fetch(url, limit=3)
+                for item in items:
+                    posts.append({
+                        "title": item.title,
+                        "summary": item.summary[:350] if item.summary else "",
+                        "link": item.link,
+                        "source": item.feed_title if hasattr(item, "feed_title") else "Неизвестный"
+                    })
+            except Exception as e:
+                logger.error(f"Pipeline RSS error {url}: {e}")
+        return posts[:8]
+else:
+    # Встроенный парсер
+    async def fetch_news():
+        news = []
+        for url in RSS_SOURCES:
+            try:
+                feed = feedparser.parse(url)
                 for entry in feed.entries[:3]:
                     news.append({
-                        'title': entry.title,
-                        'summary': entry.summary[:250] if 'summary' in entry else entry.description[:250] if 'description' in entry else '',
-                        'link': entry.link,
-                        'source': feed.feed.title if 'title' in feed.feed else 'Неизвестный'
+                        "title": entry.title,
+                        "summary": entry.summary[:350] if "summary" in entry else entry.description[:350] if "description" in entry else "",
+                        "link": entry.link,
+                        "source": feed.feed.title if "title" in feed.feed else "Неизвестный"
                     })
                 await asyncio.sleep(0.5)
-        except Exception as e:
-            logger.error(f"RSS error {url}: {e}")
-    return news[:10]
+            except Exception as e:
+                logger.error(f"RSS error {url}: {e}")
+        return news[:8]
 
-# ========== AI ФУНКЦИИ ==========
-async def ai_rewrite(text):
-    try:
-        response = await openai_client.chat.completions.create(
-            model=CURRENT_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Перепиши эту новость в стиле RedRace:\n\n{text}"}
-            ],
-            max_tokens=300,
-            timeout=60.0
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"AI error: {e}")
-        return text
+# ========== СИСТЕМНЫЙ ПРОМПТ ==========
+SYSTEM_PROMPT = """Ты — Нико, редактор новостей и голос канала RedRace. 
+Ты пишешь коротко, ёмко, с драйвом. Используй эмодзи (1-2 на пост). 
+Без воды, без маркдауна. Только факты и контекст. 
+Ты — голос RedRace. Создан командой P4/9."""
+
+async def format_news_for_channel(news_item):
+    """Форматирует новость для публикации в канал с помощью AI"""
+    if USE_PIPELINE:
+        try:
+            text = await post_gen.generate(news_item, system_prompt=SYSTEM_PROMPT)
+            if text:
+                return text
+        except Exception as e:
+            logger.error(f"Pipeline generation error: {e}")
+    
+    # Fallback на встроенный формат
+    prompt = f"Перепиши эту новость в стиле RedRace:\n\n{news_item['title']}\n{news_item['summary']}"
+    ai_text = await ai.call(prompt, SYSTEM_PROMPT, 300)
+    if ai_text:
+        return ai_text
+    else:
+        return f"📰 {news_item['title']}\n\n{news_item['summary']}\n\n<a href='{news_item['link']}'>Читать полностью</a>"
 
 # ========== КОМАНДЫ ==========
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: types.Message):
     await message.answer(
         "👋 <b>Нико — AI-редактор RedRace</b>\n\n"
         "Разработан командой <b>P4/9</b>.\n\n"
         "📰 /news — найти и опубликовать новости\n"
-        "❓ /ask — задать вопрос ИИ\n"
         "📊 /status — статус бота\n"
-        "🧠 /model — текущая модель ИИ\n"
         "🔧 /admin — админ-панель\n"
         "⚖️ /legal — юридическая информация"
     )
 
-@dp.message(Command("model"))
-async def cmd_model(message: Message):
-    current_label = AVAILABLE_MODELS.get(CURRENT_MODEL, CURRENT_MODEL)
-    await message.answer(f"🧠 Текущая модель: <b>{current_label}</b>")
+@dp.message(Command("news"))
+async def cmd_news(message: types.Message):
+    await message.answer("📡 Собираю новости...")
+    news = await fetch_news()
+    if not news:
+        await message.answer("❌ Свежих новостей нет.")
+        return
+    for item in news[:3]:
+        text = await format_news_for_channel(item)
+        await bot.send_message(CHANNEL_ID, text, parse_mode="HTML")
+        await asyncio.sleep(0.5)
+    await message.answer("✅ Новости опубликованы в канале!")
+
+@dp.message(Command("status"))
+async def cmd_status(message: types.Message):
+    await message.answer(
+        f"🤖 <b>Статус Нико</b>\n\n"
+        f"📡 RSS источников: {len(RSS_SOURCES)}\n"
+        f"🧠 AI-провайдеров: {len(ai.providers)}\n"
+        f"📦 Библиотека f1-blog-pipeline: {'✅' if USE_PIPELINE else '❌'}\n"
+        f"🔄 Авто-публикация: каждые 2 часа"
+    )
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещён.")
+        return
+    await message.answer("🔧 Админ-панель доступна. Используй /news для ручной публикации.")
 
 @dp.message(Command("legal"))
-async def cmd_legal(message: Message):
+async def cmd_legal(message: types.Message):
     await message.answer(
         "<b>Юридическая информация</b>\n\n"
         "Бот: <b>Нико</b> — голос канала <b>RedRace</b>\n"
@@ -182,166 +201,20 @@ async def cmd_legal(message: Message):
         parse_mode="HTML"
     )
 
-@dp.message(Command("status"))
-async def cmd_status(message: Message):
-    current_label = AVAILABLE_MODELS.get(CURRENT_MODEL, CURRENT_MODEL)
-    await message.answer(
-        f"🤖 <b>Статус Нико</b>\n\n"
-        f"📰 Постов в очереди: {len(pending_posts)}\n"
-        f"📡 RSS источников: {len(RSS_SOURCES)}\n"
-        f"🧠 Модель: {current_label}\n"
-        f"🔄 Расписание: каждые 3 часа"
-    )
-
-@dp.message(Command("admin"))
-async def cmd_admin(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Доступ запрещён.")
-        return
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📰 Проверить RSS", callback_data="admin_check_rss")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="🔄 Очистить очередь", callback_data="admin_clear")],
-        [InlineKeyboardButton(text="🧠 Сменить модель", callback_data="admin_show_models")],
-    ])
-    await message.answer("🔧 Админ-панель", reply_markup=keyboard)
-
-@dp.message(Command("news"))
-async def cmd_news(message: Message):
-    await message.answer("📡 Сканирую русские автоспортивные RSS-ленты...")
-    posts = await fetch_all_feeds()
-    if not posts:
-        await message.answer("❌ Свежих новостей нет.")
-        return
-    for idx, post in enumerate(posts[:8]):
-        post_id = f"post_{idx}_{datetime.now().timestamp()}"
-        pending_posts[post_id] = post
-        text = f"📰 <b>{post['title']}</b>\n\n{post['summary'][:300]}...\n\nИсточник: {post['source']}"
-        await message.answer(text, reply_markup=get_buttons(post_id))
-    await message.answer("✅ Новости загружены. Выберите действие.")
-
-@dp.message(Command("ask"))
-async def cmd_ask(message: Message):
-    await message.answer("🧠 Задайте вопрос. Я отвечу через ИИ.")
-
-@dp.message(lambda msg: msg.text and ('@RedNico_bot' in msg.text or msg.chat.type == 'private'))
-async def handle_question(message: Message):
-    text = message.text.replace('@RedNico_bot', '').strip()
-    if not text:
-        await message.reply("👋 Спрашивай, брат! Что тебя интересует?")
-        return
-
-    try:
-        response = await openai_client.chat.completions.create(
-            model=CURRENT_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text}
-            ],
-            max_tokens=500,
-            timeout=60.0
-        )
-        await message.reply(response.choices[0].message.content)
-    except asyncio.TimeoutError:
-        await message.reply("⏳ OpenRouter тупит, попробуй позже.")
-    except Exception as e:
-        await message.reply(f"⚠️ Ошибка: {e}")
-
-# ========== КОЛБЭКИ ==========
-@dp.callback_query(lambda c: c.data.startswith("publish_"))
-async def publish_post(callback: CallbackQuery):
-    post_id = callback.data.split("_")[1]
-    await callback.answer()
-    post = pending_posts.pop(post_id, None)
-    if not post:
-        await callback.message.edit_text("⏳ Эта новость уже была обработана.")
-        return
-
-    try:
-        await bot.send_message(CHANNEL_ID, format_post(post), parse_mode="HTML")
-        await callback.message.edit_text("✅ Новость опубликована в канале!")
-        logger.info(f"✅ Опубликовано: {post['title']}")
-    except Exception as e:
-        logger.error(f"Ошибка публикации: {e}")
-        await callback.message.edit_text(f"❌ Ошибка публикации: {e}")
-
-@dp.callback_query(lambda c: c.data.startswith("rewrite_"))
-async def rewrite_post(callback: CallbackQuery):
-    post_id = callback.data.split("_")[1]
-    post = pending_posts.get(post_id)
-    if not post:
-        await callback.answer("Новость не найдена.", show_alert=True)
-        return
-    await callback.answer("🔄 Переписываю...")
-    new_text = await ai_rewrite(post['summary'])
-    post['summary'] = new_text
-    await callback.message.edit_text(
-        f"✏️ <b>Рерайт:</b>\n\n{new_text[:500]}...\n\nИсточник: {post['source']}",
-        reply_markup=get_buttons(post_id)
-    )
-
-@dp.callback_query(lambda c: c.data.startswith("skip_"))
-async def skip_post(callback: CallbackQuery):
-    post_id = callback.data.split("_")[1]
-    await callback.answer()
-    post = pending_posts.pop(post_id, None)
-    if not post:
-        await callback.message.edit_text("⏳ Эта новость уже была пропущена.")
-        return
-    await callback.message.delete()
-
-@dp.callback_query(lambda c: c.data.startswith("admin_"))
-async def admin_callbacks(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("⛔ Доступ запрещён.", show_alert=True)
-        return
-    action = callback.data.split("_")[1]
-    if action == "check_rss":
-        await callback.answer("📡 Проверяю RSS...")
-        posts = await fetch_all_feeds()
-        if not posts:
-            await callback.message.answer("❌ Новостей нет.")
-            return
-        for post in posts[:3]:
-            await callback.message.answer(f"📰 {post['title']}\n{post['summary'][:150]}...")
-        await callback.message.answer("✅ RSS работает.")
-    elif action == "stats":
-        await callback.answer(f"📊 В очереди: {len(pending_posts)}", show_alert=True)
-    elif action == "clear":
-        pending_posts.clear()
-        await callback.answer("🗑️ Очередь очищена.", show_alert=True)
-    elif action == "show_models":
-        await callback.message.answer("🧠 <b>Выберите модель ИИ:</b>", reply_markup=get_model_buttons())
-        await callback.answer()
-
-@dp.callback_query(lambda c: c.data.startswith("setmodel_"))
-async def set_model(callback: CallbackQuery):
-    global CURRENT_MODEL
-    model_id = callback.data.replace("setmodel_", "")
-    if model_id in AVAILABLE_MODELS:
-        CURRENT_MODEL = model_id
-        await callback.answer(f"✅ Модель изменена на {AVAILABLE_MODELS[model_id]}")
-        await callback.message.edit_text(
-            f"✅ Текущая модель: <b>{AVAILABLE_MODELS[model_id]}</b>\n\nВыберите другую:",
-            reply_markup=get_model_buttons()
-        )
-    else:
-        await callback.answer("⚠️ Модель не найдена.", show_alert=True)
-
 # ========== АВТО-ПУБЛИКАЦИЯ ==========
 async def auto_publish():
     logger.info("🔄 Авто-публикация...")
-    posts = await fetch_all_feeds()
-    if not posts:
+    news = await fetch_news()
+    if not news:
         return
-    for post in posts[:2]:
-        try:
-            await bot.send_message(CHANNEL_ID, format_post(post), parse_mode="HTML")
-            logger.info(f"✅ Авто-публикация: {post['title']}")
-        except Exception as e:
-            logger.error(f"Ошибка авто-публикации: {e}")
+    for item in news[:2]:
+        text = await format_news_for_channel(item)
+        await bot.send_message(CHANNEL_ID, text, parse_mode="HTML")
+        logger.info(f"✅ Опубликовано: {item['title']}")
+        await asyncio.sleep(0.5)
 
-scheduler.add_job(auto_publish, 'interval', hours=3)
+scheduler = AsyncIOScheduler(timezone="UTC")
+scheduler.add_job(auto_publish, 'interval', hours=2)
 scheduler.start()
 
 # ========== ЗАГЛУШКА ДЛЯ RENDER ==========
