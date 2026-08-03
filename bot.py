@@ -342,5 +342,26 @@ async def main():
     logger.info("🚀 Нико запущен!")
     await dp.start_polling(bot)
 
+from aiohttp import web
+
+async def health_check(request):
+    """Заглушка для Render. Просто отвечает 'OK'."""
+    return web.Response(text="OK", status=200)
+
+async def start_web_server():
+    """Запускает веб-сервер на порту 8000, чтобы Render не перезапускал бота."""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)  # Многие сервисы проверяют /health
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8000)
+    await site.start()
+    print("✅ Веб-сервер-заглушка запущен на порту 8000")
+
+# Запускаем веб-сервер в фоне (не блокирует бота)
+loop = asyncio.get_event_loop()
+loop.create_task(start_web_server())
+
 if __name__ == "__main__":
     asyncio.run(main())
