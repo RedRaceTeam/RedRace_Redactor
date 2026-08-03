@@ -13,9 +13,9 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from newspaper import Article
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
+import httpx
 
 load_dotenv()
 
@@ -75,12 +75,11 @@ AVAILABLE_MODELS = {
     "google/gemini-2.0-flash-thinking:free": "⚡ Gemini Flash",
 }
 
-# ========== ТОЛЬКО РУССКИЕ RSS-ИСТОЧНИКИ ==========
+# ========== ТОЛЬКО РУССКИЕ АВТОСПОРТИВНЫЕ ИСТОЧНИКИ ==========
 RSS_SOURCES = [
-    "https://www.f1news.ru/export/news.xml",              # F1News.ru
-    "https://autosport.com.ru/rss.xml",                   # Autosport.com.ru
-    "https://www.sport-express.ru/services/rss/news/f1/", # Спорт-Экспресс
-    "https://www.championat.com/rss/news/auto.xml",       # Чемпионат.com
+    "https://autosport.com.ru/rss",                # Autosport.com.ru — главный русский автоспорт
+    "https://www.f1news.ru/export/news.xml",       # F1News.ru (если работает)
+    "https://www.championat.com/rss/news/auto.xml",# Чемпионат.com — автоспорт
 ]
 
 scheduler = AsyncIOScheduler(timezone="UTC")
@@ -114,29 +113,22 @@ def get_model_buttons():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ========== ПАРСИНГ ==========
-async def fetch_full_article(url: str) -> str:
-    try:
-        article = Article(url)
-        article.download()
-        article.parse()
-        return article.text[:500] if article.text else None
-    except Exception as e:
-        logger.error(f"Ошибка парсинга {url}: {e}")
-        return None
-
 async def fetch_all_feeds():
     news = []
     for url in RSS_SOURCES:
         try:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:3]:
-                full_text = await fetch_full_article(entry.link)
-                news.append({
-                    'title': entry.title,
-                    'summary': full_text if full_text else entry.summary[:250] if 'summary' in entry else '',
-                    'link': entry.link,
-                    'source': feed.feed.title if 'title' in feed.feed else 'Неизвестный'
-                })
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url)
+                if response.status_code != 200:
+                    continue
+                feed = feedparser.parse(response.text)
+                for entry in feed.entries[:3]:
+                    news.append({
+                        'title': entry.title,
+                        'summary': entry.summary[:250] if 'summary' in entry else entry.description[:250] if 'description' in entry else '',
+                        'link': entry.link,
+                        'source': feed.feed.title if 'title' in feed.feed else 'Неизвестный'
+                    })
                 await asyncio.sleep(0.5)
         except Exception as e:
             logger.error(f"RSS error {url}: {e}")
@@ -151,26 +143,12 @@ async def ai_rewrite(text):
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": f"Перепиши эту новость в стиле RedRace:\n\n{text}"}
             ],
-            max_tokens=300
+            max_tokens=300,
+            timeout=60.0
         )
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"AI error: {e}")
-        return text
-
-async def translate_text(text):
-    try:
-        response = await openai_client.chat.completions.create(
-            model=CURRENT_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Переведи этот текст на русский и адаптируй под стиль RedRace:\n\n{text}"}
-            ],
-            max_tokens=500
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"Translation error: {e}")
         return text
 
 # ========== КОМАНДЫ ==========
@@ -230,7 +208,7 @@ async def cmd_admin(message: Message):
 
 @dp.message(Command("news"))
 async def cmd_news(message: Message):
-    await message.answer("📡 Сканирую русские RSS-ленты...")
+    await message.answer("📡 Сканирую русские автоспортивные RSS-ленты...")
     posts = await fetch_all_feeds()
     if not posts:
         await message.answer("❌ Свежих новостей нет.")
@@ -246,7 +224,6 @@ async def cmd_news(message: Message):
 async def cmd_ask(message: Message):
     await message.answer("🧠 Задайте вопрос. Я отвечу через ИИ.")
 
-# ========== ОТВЕТЫ ТОЛЬКО ПО ТЕГУ ==========
 @dp.message(lambda msg: msg.text and ('@RedNico_bot' in msg.text or msg.chat.type == 'private'))
 async def handle_question(message: Message):
     text = message.text.replace('@RedNico_bot', '').strip()
@@ -261,9 +238,12 @@ async def handle_question(message: Message):
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": text}
             ],
-            max_tokens=500
+            max_tokens=500,
+            timeout=60.0
         )
         await message.reply(response.choices[0].message.content)
+    except asyncio.TimeoutError:
+        await message.reply("⏳ OpenRouter тупит, попробуй позже.")
     except Exception as e:
         await message.reply(f"⚠️ Ошибка: {e}")
 
@@ -377,14 +357,12 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', 8000)
     await site.start()
     print("✅ Веб-сервер-заглушка запущен на порту 8000")
+    await asyncio.Event().wait()
 
-loop = asyncio.get_event_loop()
-loop.create_task(start_web_server())
-
-# ========== ЗАПУСК БОТА ==========
 async def main():
+    asyncio.create_task(start_web_server())
     logger.info("🚀 Нико запущен!")
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, timeout=120)
 
 if __name__ == "__main__":
     asyncio.run(main())
