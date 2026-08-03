@@ -1,4 +1,4 @@
- aiogram==3.27.0
+aiogram==3.27.0
 feedparser==6.0.12
 beautifulsoup4==4.12.3
 apscheduler==3.10.4
@@ -6,3 +6,4 @@ httpx==0.28.1
 python-dotenv==1.0.1
 aiofiles==24.1.0
 openai==1.65.5
+news-fetch==0.1.0
