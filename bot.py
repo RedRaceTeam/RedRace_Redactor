@@ -13,8 +13,9 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from newsfetch.news import Newspaper
+from newspaper import Article
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiohttp import web
 
 load_dotenv()
 
@@ -26,7 +27,6 @@ ADMIN_ID = int(os.getenv("ADMIN_ID"))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== ИНИЦИАЛИЗАЦИЯ ==========
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
@@ -35,38 +35,30 @@ openai_client = AsyncOpenAI(
     api_key=OPENROUTER_API_KEY,
 )
 
-# ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
 pending_posts = {}
-CURRENT_MODEL = "openrouter/free"  # по умолчанию авто-роутер
+CURRENT_MODEL = "openrouter/free"
 
-# Список доступных моделей
 AVAILABLE_MODELS = {
     "openrouter/free": "🚀 Авто (OpenRouter)",
-    "nvidia/nemotron-3-ultra:free": "🧠 Nemotron Ultra (код, логика)",
-    "nvidia/nemotron-3-super:free": "⚡ Nemotron Super (быстрый, 12B)",
-    "tencent/hy3:free": "🐧 Tencent HY3 (логика, 21B)",
-    "deepseek/deepseek-r1:free": "🤖 DeepSeek R1 (рассуждающая)",
-    "qwen/qwen3-next-80b-a3b-instruct:free": "🐉 Qwen 3 Next (креатив)",
-    "google/gemma-4-31b:free": "🧪 Gemma 4 (живой язык)",
+    "nvidia/nemotron-3-ultra:free": "🧠 Nemotron Ultra",
+    "deepseek/deepseek-r1:free": "🤖 DeepSeek R1",
+    "qwen/qwen-3-7b:free": "🐉 Qwen 3",
+    "google/gemini-2.0-flash-thinking:free": "⚡ Gemini Flash",
 }
 
-# RSS-источники
 RSS_SOURCES = [
     "https://www.f1news.ru/export/news.xml",
     "https://www.autosport.com/rss/feeds/f1",
     "https://www.bbc.com/sport/formula1/rss.xml",
     "https://www.grandprix247.com/feed",
     "https://www.gpblog.com/en/feed",
-    "https://www.championat.com/rss/news/auto.xml",
 ]
 
 scheduler = AsyncIOScheduler(timezone="UTC")
 
-# ========== FSM ==========
 class EditPost(StatesGroup):
     waiting_for_text = State()
 
-# ========== ХЕЛПЕРЫ ==========
 def clean_html(text):
     return re.sub(r'<[^>]+>', '', text)
 
@@ -78,34 +70,25 @@ def format_post(entry):
 
 def get_buttons(post_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"publish_{post_id}"),
-            InlineKeyboardButton(text="✏️ Рерайт", callback_data=f"rewrite_{post_id}"),
-        ],
-        [
-            InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip_{post_id}"),
-        ]
+        [InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"publish_{post_id}"),
+         InlineKeyboardButton(text="✏️ Рерайт", callback_data=f"rewrite_{post_id}")],
+        [InlineKeyboardButton(text="❌ Пропустить", callback_data=f"skip_{post_id}")]
     ])
 
 def get_model_buttons():
-    """Клавиатура для выбора модели"""
     buttons = []
     for model_id, label in AVAILABLE_MODELS.items():
-        # помечаем текущую модель
         is_current = model_id == CURRENT_MODEL
         text = f"{'✅ ' if is_current else ''}{label}"
         buttons.append([InlineKeyboardButton(text=text, callback_data=f"setmodel_{model_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ========== ПАРСИНГ RSS И СТАТЕЙ ==========
 async def fetch_full_article(url: str) -> str:
     try:
-        article = Newspaper(url)
-        full_text = article.article
-        if full_text and len(full_text) > 100:
-            return full_text
-        else:
-            return None
+        article = Article(url)
+        article.download()
+        article.parse()
+        return article.text[:500] if article.text else None
     except Exception as e:
         logger.error(f"Ошибка парсинга {url}: {e}")
         return None
@@ -116,13 +99,11 @@ async def fetch_all_feeds():
         try:
             feed = feedparser.parse(url)
             for entry in feed.entries[:3]:
-                link = entry.link
-                full_text = await fetch_full_article(link)
-                summary = full_text if full_text else (entry.summary[:250] if 'summary' in entry else '')
+                full_text = await fetch_full_article(entry.link)
                 news.append({
                     'title': entry.title,
-                    'summary': summary,
-                    'link': link,
+                    'summary': full_text if full_text else entry.summary[:250] if 'summary' in entry else '',
+                    'link': entry.link,
                     'source': feed.feed.title if 'title' in feed.feed else 'Неизвестный'
                 })
                 await asyncio.sleep(0.5)
@@ -130,7 +111,6 @@ async def fetch_all_feeds():
             logger.error(f"RSS error {url}: {e}")
     return news[:10]
 
-# ========== AI ФУНКЦИИ ==========
 async def ai_rewrite(text):
     try:
         response = await openai_client.chat.completions.create(
@@ -151,7 +131,7 @@ async def translate_text(text):
         response = await openai_client.chat.completions.create(
             model=CURRENT_MODEL,
             messages=[
-                {"role": "system", "content": "Ты — переводчик. Переведи следующий текст на русский язык. Сохрани смысл и терминологию Формулы-1. Не добавляй лишнего."},
+                {"role": "system", "content": "Ты — переводчик. Переведи текст на русский. Сохрани смысл и терминологию F1."},
                 {"role": "user", "content": text}
             ],
             max_tokens=500
@@ -161,17 +141,16 @@ async def translate_text(text):
         logger.error(f"Translation error: {e}")
         return text
 
-# ========== КОМАНДЫ ==========
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
         "👋 <b>Нико — AI-редактор RedRace</b>\n\n"
-        "📰 <b>/news</b> — найти и опубликовать новости\n"
-        "❓ <b>/ask</b> — задать вопрос ИИ\n"
-        "📊 <b>/status</b> — статус бота\n"
-        "🧠 <b>/model</b> — текущая модель ИИ\n"
-        "🔧 <b>/admin</b> — админ-панель\n"
-        "⚖️ <b>/legal</b> — юридическая информация"
+        "📰 /news — найти новости\n"
+        "❓ /ask — спросить ИИ\n"
+        "📊 /status — статус\n"
+        "🧠 /model — текущая модель\n"
+        "🔧 /admin — админ-панель\n"
+        "⚖️ /legal — юр. информация"
     )
 
 @dp.message(Command("model"))
@@ -181,19 +160,15 @@ async def cmd_model(message: Message):
 
 @dp.message(Command("legal"))
 async def cmd_legal(message: Message):
-    legal_text = """
-<b>Юридическая информация</b>
-
-Разработчик: <b>P4/9 Dev</b>
-Бот: <b>Nico™</b>
-
-Данный бот и его контент не являются официальными и не имеют никакого отношения к Формуле-1, ее руководству, командам, пилотам или любым аффилированным лицам.
-
-Все материалы предоставлены на основе открытых источников и не нарушают авторских прав.
-
-© 2026 P4/9 Dev. Все права защищены.
-"""
-    await message.answer(legal_text, parse_mode="HTML")
+    await message.answer(
+        "<b>Юридическая информация</b>\n\n"
+        "Разработчик: <b>P4/9 Dev</b>\n"
+        "Бот: <b>Nico™</b>\n\n"
+        "Данный бот и его контент не являются официальными и не имеют отношения к Формуле-1.\n"
+        "Все материалы предоставлены на основе открытых источников.\n\n"
+        "© 2026 P4/9 Dev. Все права защищены.",
+        parse_mode="HTML"
+    )
 
 @dp.message(Command("status"))
 async def cmd_status(message: Message):
@@ -221,7 +196,7 @@ async def cmd_admin(message: Message):
 
 @dp.message(Command("news"))
 async def cmd_news(message: Message):
-    await message.answer("📡 Сканирую RSS и собираю полные статьи...")
+    await message.answer("📡 Сканирую RSS...")
     posts = await fetch_all_feeds()
     if not posts:
         await message.answer("❌ Свежих новостей нет.")
@@ -231,11 +206,11 @@ async def cmd_news(message: Message):
         pending_posts[post_id] = post
         text = f"📰 <b>{post['title']}</b>\n\n{post['summary'][:300]}...\n\nИсточник: {post['source']}"
         await message.answer(text, reply_markup=get_buttons(post_id))
-    await message.answer("✅ Новости загружены. Выберите действие.")
+    await message.answer("✅ Новости загружены.")
 
 @dp.message(Command("ask"))
 async def cmd_ask(message: Message):
-    await message.answer("🧠 Задайте вопрос. Я отвечу через ИИ.")
+    await message.answer("🧠 Задайте вопрос.")
 
 @dp.message(lambda msg: not msg.text.startswith('/') and msg.text)
 async def handle_question(message: Message):
@@ -248,14 +223,13 @@ async def handle_question(message: Message):
     except Exception as e:
         await message.reply(f"⚠️ Ошибка: {e}")
 
-# ========== КОЛБЭКИ ==========
 @dp.callback_query(lambda c: c.data.startswith("publish_"))
 async def publish_post(callback: CallbackQuery):
     post_id = callback.data.split("_")[1]
     await callback.answer()
     post = pending_posts.pop(post_id, None)
     if not post:
-        await callback.message.edit_text("⏳ Эта новость уже была обработана.")
+        await callback.message.edit_text("⏳ Новость уже обработана.")
         return
     await bot.send_message(CHANNEL_ID, format_post(post), parse_mode="HTML")
     await callback.message.delete()
@@ -281,7 +255,7 @@ async def skip_post(callback: CallbackQuery):
     await callback.answer()
     post = pending_posts.pop(post_id, None)
     if not post:
-        await callback.message.edit_text("⏳ Эта новость уже была пропущена.")
+        await callback.message.edit_text("⏳ Новость уже пропущена.")
         return
     await callback.message.delete()
 
@@ -316,7 +290,6 @@ async def set_model(callback: CallbackQuery):
     if model_id in AVAILABLE_MODELS:
         CURRENT_MODEL = model_id
         await callback.answer(f"✅ Модель изменена на {AVAILABLE_MODELS[model_id]}")
-        # обновляем сообщение с кнопками, чтобы отметить текущую
         await callback.message.edit_text(
             f"✅ Текущая модель: <b>{AVAILABLE_MODELS[model_id]}</b>\n\nВыберите другую:",
             reply_markup=get_model_buttons()
@@ -337,31 +310,27 @@ async def auto_publish():
 scheduler.add_job(auto_publish, 'interval', hours=3)
 scheduler.start()
 
-# ========== ЗАПУСК ==========
-async def main():
-    logger.info("🚀 Нико запущен!")
-    await dp.start_polling(bot)
-
-from aiohttp import web
-
+# ========== ЗАГЛУШКА ДЛЯ RENDER ==========
 async def health_check(request):
-    """Заглушка для Render. Просто отвечает 'OK'."""
     return web.Response(text="OK", status=200)
 
 async def start_web_server():
-    """Запускает веб-сервер на порту 8000, чтобы Render не перезапускал бота."""
     app = web.Application()
     app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)  # Многие сервисы проверяют /health
+    app.router.add_get('/health', health_check)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 8000)
     await site.start()
     print("✅ Веб-сервер-заглушка запущен на порту 8000")
 
-# Запускаем веб-сервер в фоне (не блокирует бота)
 loop = asyncio.get_event_loop()
 loop.create_task(start_web_server())
+
+# ========== ЗАПУСК БОТА ==========
+async def main():
+    logger.info("🚀 Нико запущен!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
