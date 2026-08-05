@@ -16,8 +16,8 @@ from google import genai
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
-# ========== НОВЫЕ БИБЛИОТЕКИ ДЛЯ НОВОСТЕЙ ==========
-from newsfetch.news import Newspaper
+# ========== НОВЫЕ БИБЛИОТЕКИ ==========
+from newspaper import Article
 import trafilatura
 
 load_dotenv()
@@ -74,33 +74,31 @@ SYSTEM_PROMPT = """Ты — Нико, голос канала RedRace.
 
 Ты — голос RedRace. Создан командой P4/9. Будь профессионалом."""
 
-# ========== НОВЫЙ ЖЕЛЕЗОБЕТОННЫЙ ПАРСЕР НОВОСТЕЙ ==========
+# ========== ПАРСЕР НОВОСТЕЙ ==========
 published_links = set()
 pending_posts = {}
 
 def extract_article(url, fallback_summary=""):
-    """
-    Извлекает полную статью по ссылке.
-    Сначала news-fetch, если не вышло — trafilatura.
-    Всегда возвращает словарь с полями.
-    """
-    # Пробуем news-fetch
+    """Извлекает полную статью по ссылке."""
+    # 1. Пробуем newspaper4k
     try:
-        article = Newspaper(url)
-        if article and article.text:
+        article = Article(url)
+        article.download()
+        article.parse()
+        if article.text:
             return {
-                'title': article.headline,
+                'title': article.title,
                 'author': article.authors[0] if article.authors else None,
                 'published': article.publish_date,
                 'text': article.text,
-                'summary': article.summary or article.text[:300],
+                'summary': article.text[:300] + "..." if len(article.text) > 300 else article.text,
                 'keywords': article.keywords,
-                'source': 'news-fetch'
+                'source': 'newspaper4k'
             }
     except Exception as e:
-        logger.warning(f"news-fetch error: {e}")
+        logger.warning(f"newspaper4k error: {e}")
 
-    # Пробуем trafilatura
+    # 2. Пробуем trafilatura
     try:
         downloaded = trafilatura.fetch_url(url)
         if downloaded:
@@ -118,7 +116,7 @@ def extract_article(url, fallback_summary=""):
     except Exception as e:
         logger.warning(f"trafilatura error: {e}")
 
-    # Если ничего не получилось — возвращаем заглушку
+    # 3. Заглушка
     return {
         'title': None,
         'author': None,
@@ -140,7 +138,6 @@ async def fetch_news(limit=8):
                 if link in published_links:
                     continue
                 
-                # Получаем полную статью
                 fallback_summary = entry.summary[:350] if "summary" in entry else ""
                 full_article = extract_article(link, fallback_summary)
                 
@@ -216,7 +213,7 @@ async def start(message: Message):
     await message.answer(
         "👋 <b>Нико — редактор RedRace</b>\n\n"
         "Использует <b>Google Gemini 3.5 Flash</b>.\n"
-        "Новости парсятся через <b>news-fetch + trafilatura</b>.\n"
+        "Новости парсятся через <b>newspaper4k + trafilatura</b>.\n"
         "Просто напиши мне что-нибудь — я отвечу.\n\n"
         "/admin — управление"
     )
