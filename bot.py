@@ -3,7 +3,6 @@ import logging
 import os
 import feedparser
 from datetime import datetime
-import requests
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -14,7 +13,7 @@ from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from aiohttp import web, ClientSession, ClientTimeout
+from aiohttp import web, ClientTimeout
 
 load_dotenv()
 
@@ -33,7 +32,8 @@ dp = Dispatcher()
 openrouter = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
-    timeout=ClientTimeout(total=60)
+    timeout=ClientTimeout(total=60),
+    max_retries=3
 )
 
 # ========== FSM ==========
@@ -64,27 +64,37 @@ async def fetch_news():
             logger.error(f"RSS error: {e}")
     return news[:8]
 
-# ========== AI ФУНКЦИИ (OpenRouter) ==========
+# ========== AI ФУНКЦИИ ==========
 SYSTEM_PROMPT = """Ты — Нико, голос канала RedRace.
 Пиши новости коротко, ёмко, с драйвом. Используй эмодзи (1-2).
 Без маркдауна, без воды, только факты и контекст.
 Создан командой P4/9."""
 
 async def ask_openrouter(prompt: str, system: str = SYSTEM_PROMPT) -> str:
-    try:
-        resp = await openrouter.chat.completions.create(
-            model="openrouter/free",  # бесплатная модель
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=500,
-            temperature=0.7
-        )
-        return resp.choices[0].message.content
-    except Exception as e:
-        logger.error(f"AI error: {e}")
-        return None
+    models = [
+        "openrouter/free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "deepseek/deepseek-r1:free"
+    ]
+    
+    for model in models:
+        try:
+            resp = await openrouter.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=500,
+                temperature=0.7
+            )
+            logger.info(f"✅ Ответ от {model}")
+            return resp.choices[0].message.content
+        except Exception as e:
+            logger.warning(f"⚠️ {model} упала: {e}")
+            await asyncio.sleep(1)
+    
+    return None
 
 # ========== ИНТЕРФЕЙС ==========
 def admin_menu():
@@ -110,7 +120,6 @@ async def admin(message: Message):
         return
     await message.answer("🔧 Админ-панель", reply_markup=admin_menu())
 
-# ========== ОБРАБОТКА ЛЮБЫХ СООБЩЕНИЙ ==========
 @dp.message(F.text)
 async def chat_reply(message: Message):
     if message.text.startswith('/'):
@@ -151,7 +160,7 @@ async def callback(callback: CallbackQuery):
     elif callback.data == "status":
         await callback.message.answer(
             f"🤖 <b>Статус</b>\n\n"
-            f"🧠 AI: OpenRouter (бесплатно)\n"
+            f"🧠 AI: OpenRouter\n"
             f"📡 RSS: {len(RSS_SOURCES)}\n"
             f"🔄 Авто: каждые 2 часа"
         )
@@ -188,7 +197,6 @@ async def web_server():
     await web.TCPSite(runner, "0.0.0.0", 8000).start()
     await asyncio.Event().wait()
 
-# ========== ЗАПУСК ==========
 async def main():
     asyncio.create_task(web_server())
     logger.info("🚀 Нико на OpenRouter запущен!")
