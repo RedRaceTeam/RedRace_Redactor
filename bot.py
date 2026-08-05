@@ -3,7 +3,6 @@ import logging
 import os
 import feedparser
 from datetime import datetime
-from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -16,7 +15,7 @@ from google import genai
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
-# ========== НОВЫЕ БИБЛИОТЕКИ ==========
+# Новый импорт для новостей
 from newspaper import Article
 import trafilatura
 
@@ -33,7 +32,7 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# ========== AI КЛИЕНТ GOOGLE GEMINI ==========
+# ========== AI КЛИЕНТ GOOGLE GEMINI (новая SDK) ==========
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ========== FSM ==========
@@ -49,30 +48,9 @@ RSS_SOURCES = [
 
 # ========== СИСТЕМНЫЙ ПРОМПТ ==========
 SYSTEM_PROMPT = """Ты — Нико, голос канала RedRace.
-Твоя задача — делать новости Формулы-1 живыми, точными и увлекательными для фанатов.
-
-🔹 Стиль:
-— Пиши как комментатор: коротко, ёмко, с драйвом.
-— Используй эмодзи 🏎️🔥🏁, но не перебарщивай (1–2 на пост).
-— Без воды. Только факты и контекст.
-— Если новость техническая — объясни простыми словами.
-
-🔹 Тон:
-— Дружелюбный, но уважительный.
-— Без излишнего пафоса. Без политики.
-— Если шутка — уместная, лёгкая.
-
-🔹 Формат поста:
-— Заголовок: ёмкий, кликбейтный, но честный.
-— Основной текст: 3–5 предложений, суть.
-— В конце: ссылка на источник (если есть).
-
-🔹 Запрещено:
-— Маркдаун, звёздочки, подчёркивания.
-— Спекуляции без подтверждения.
-— Оскорбления пилотов, команд или болельщиков.
-
-Ты — голос RedRace. Создан командой P4/9. Будь профессионалом."""
+Пиши новости коротко, ёмко, с драйвом. Используй эмодзи (1-2).
+Без маркдауна, без воды, только факты и контекст.
+Создан командой P4/9."""
 
 # ========== ПАРСЕР НОВОСТЕЙ ==========
 published_links = set()
@@ -178,15 +156,19 @@ async def create_post(news_item):
         news_item['source']
     )
 
-# ========== AI ФУНКЦИЯ ==========
+# ========== AI ФУНКЦИЯ (новая SDK) ==========
 async def ask_gemini(prompt: str, system: str = SYSTEM_PROMPT) -> str:
     try:
-        interaction = client.interactions.create(
-            model="gemini-3.5-flash",
-            input=prompt,
-            system_instruction=system
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+            config={
+                "system_instruction": system,
+                "max_output_tokens": 500,
+                "temperature": 0.7
+            }
         )
-        return interaction.output_text
+        return response.text
     except Exception as e:
         logger.error(f"Gemini error: {e}")
         return None
@@ -212,7 +194,7 @@ def news_buttons(post_id):
 async def start(message: Message):
     await message.answer(
         "👋 <b>Нико — редактор RedRace</b>\n\n"
-        "Использует <b>Google Gemini 3.5 Flash</b>.\n"
+        "Использует <b>Google Gemini 2.0 Flash</b>.\n"
         "Новости парсятся через <b>newspaper4k + trafilatura</b>.\n"
         "Просто напиши мне что-нибудь — я отвечу.\n\n"
         "/admin — управление"
@@ -265,7 +247,7 @@ async def callback(callback: CallbackQuery):
     elif data == "status":
         await callback.message.answer(
             f"🤖 <b>Статус Нико</b>\n\n"
-            f"🧠 AI: Google Gemini 3.5 Flash\n"
+            f"🧠 AI: Google Gemini 2.0 Flash\n"
             f"📡 RSS: {len(RSS_SOURCES)}\n"
             f"📰 В очереди: {len(pending_posts)}\n"
             f"🔄 Авто: каждые 2 часа"
