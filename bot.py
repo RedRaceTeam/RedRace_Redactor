@@ -12,16 +12,20 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from google import genai
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
+
+# ========== НОВЫЕ БИБЛИОТЕКИ ДЛЯ НОВОСТЕЙ ==========
+from newsfetch.news import Newspaper
+import trafilatura
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
-SAMBANOVA_API_KEY = os.getenv("SAMBANOVA_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,11 +33,8 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# ========== AI КЛИЕНТ SambaNova ==========
-sambanova = AsyncOpenAI(
-    base_url="https://api.sambanova.ai/v1",
-    api_key=SAMBANOVA_API_KEY,
-)
+# ========== AI КЛИЕНТ GOOGLE GEMINI ==========
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ========== FSM ==========
 class PromptStates(StatesGroup):
@@ -73,30 +74,63 @@ SYSTEM_PROMPT = """Ты — Нико, голос канала RedRace.
 
 Ты — голос RedRace. Создан командой P4/9. Будь профессионалом."""
 
-# ========== AI ФУНКЦИИ ==========
-async def ask_sambanova(prompt: str, system: str = SYSTEM_PROMPT) -> str:
-    try:
-        resp = await sambanova.chat.completions.create(
-            model="Meta-Llama-3.3-70B-Instruct",
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=500,
-            temperature=0.7
-        )
-        return resp.choices[0].message.content
-    except Exception as e:
-        logger.error(f"SambaNova error: {e}")
-        return None
-
-# ========== ПАРСЕР НОВОСТЕЙ ==========
-# Хранилище для отслеживания публикаций
+# ========== НОВЫЙ ЖЕЛЕЗОБЕТОННЫЙ ПАРСЕР НОВОСТЕЙ ==========
 published_links = set()
 pending_posts = {}
 
+def extract_article(url, fallback_summary=""):
+    """
+    Извлекает полную статью по ссылке.
+    Сначала news-fetch, если не вышло — trafilatura.
+    Всегда возвращает словарь с полями.
+    """
+    # Пробуем news-fetch
+    try:
+        article = Newspaper(url)
+        if article and article.text:
+            return {
+                'title': article.headline,
+                'author': article.authors[0] if article.authors else None,
+                'published': article.publish_date,
+                'text': article.text,
+                'summary': article.summary or article.text[:300],
+                'keywords': article.keywords,
+                'source': 'news-fetch'
+            }
+    except Exception as e:
+        logger.warning(f"news-fetch error: {e}")
+
+    # Пробуем trafilatura
+    try:
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            text = trafilatura.extract(downloaded)
+            if text:
+                return {
+                    'title': None,
+                    'author': None,
+                    'published': None,
+                    'text': text,
+                    'summary': text[:300] + "..." if len(text) > 300 else text,
+                    'keywords': None,
+                    'source': 'trafilatura'
+                }
+    except Exception as e:
+        logger.warning(f"trafilatura error: {e}")
+
+    # Если ничего не получилось — возвращаем заглушку
+    return {
+        'title': None,
+        'author': None,
+        'published': None,
+        'text': None,
+        'summary': fallback_summary or "Описание недоступно.",
+        'keywords': None,
+        'source': 'fallback'
+    }
+
 async def fetch_news(limit=8):
-    """Собирает новости из RSS-лент с защитой от дублей"""
+    """Собирает новости из RSS с полным текстом"""
     news = []
     for url in RSS_SOURCES:
         try:
@@ -105,34 +139,60 @@ async def fetch_news(limit=8):
                 link = entry.link
                 if link in published_links:
                     continue
+                
+                # Получаем полную статью
+                fallback_summary = entry.summary[:350] if "summary" in entry else ""
+                full_article = extract_article(link, fallback_summary)
+                
                 news.append({
-                    "title": entry.title,
-                    "summary": entry.summary[:350] if "summary" in entry else "",
+                    "title": full_article.get('title') or entry.title,
+                    "summary": full_article.get('summary') or fallback_summary,
                     "link": link,
-                    "source": feed.feed.title if "title" in feed.feed else "Неизвестный"
+                    "source": feed.feed.title if "title" in feed.feed else "Неизвестный",
+                    "full_text": full_article.get('text'),
+                    "keywords": full_article.get('keywords'),
+                    "author": full_article.get('author'),
+                    "parser_source": full_article.get('source')
                 })
+                
                 published_links.add(link)
-            await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)
         except Exception as e:
-            logger.error(f"RSS error: {e}")
+            logger.error(f"RSS error {url}: {e}")
     return news[:limit]
 
 def format_post_text(title, summary, link, source):
-    """Форматирует пост для канала"""
     return f"📰 <b>{title}</b>\n\n{summary}\n\n<a href='{link}'>Читать полностью</a>"
 
 async def create_post(news_item):
-    """Создаёт пост через AI"""
-    prompt = f"Перепиши эту новость в стиле RedRace:\n\n{news_item['title']}\n{news_item['summary']}"
-    text = await ask_sambanova(prompt)
-    if text:
-        return text
+    """Создаёт пост через AI, используя полный текст если есть"""
+    text_to_rewrite = news_item.get('full_text') or news_item['summary']
+    if not text_to_rewrite:
+        return format_post_text(news_item['title'], "Краткое описание недоступно.", news_item['link'], news_item['source'])
+    
+    prompt = f"Перепиши эту новость в стиле RedRace:\n\n{news_item['title']}\n{text_to_rewrite}"
+    ai_text = await ask_gemini(prompt)
+    if ai_text:
+        return ai_text
     return format_post_text(
         news_item['title'],
         news_item['summary'],
         news_item['link'],
         news_item['source']
     )
+
+# ========== AI ФУНКЦИЯ ==========
+async def ask_gemini(prompt: str, system: str = SYSTEM_PROMPT) -> str:
+    try:
+        interaction = client.interactions.create(
+            model="gemini-3.5-flash",
+            input=prompt,
+            system_instruction=system
+        )
+        return interaction.output_text
+    except Exception as e:
+        logger.error(f"Gemini error: {e}")
+        return None
 
 # ========== КНОПКИ ==========
 def admin_menu():
@@ -155,7 +215,8 @@ def news_buttons(post_id):
 async def start(message: Message):
     await message.answer(
         "👋 <b>Нико — редактор RedRace</b>\n\n"
-        "Использует <b>SambaNova AI</b>.\n"
+        "Использует <b>Google Gemini 3.5 Flash</b>.\n"
+        "Новости парсятся через <b>news-fetch + trafilatura</b>.\n"
         "Просто напиши мне что-нибудь — я отвечу.\n\n"
         "/admin — управление"
     )
@@ -174,7 +235,7 @@ async def chat_reply(message: Message):
         return
     
     await bot.send_chat_action(message.chat.id, "typing")
-    reply = await ask_sambanova(message.text)
+    reply = await ask_gemini(message.text)
     if reply:
         await message.answer(reply)
     else:
@@ -199,7 +260,7 @@ async def callback(callback: CallbackQuery):
         for idx, item in enumerate(news):
             post_id = f"post_{idx}_{int(datetime.now().timestamp())}"
             pending_posts[post_id] = item
-            text = f"📰 <b>{item['title']}</b>\n\n{item['summary']}\n\nИсточник: {item['source']}"
+            text = f"📰 <b>{item['title']}</b>\n\n{item['summary'][:300]}...\n\nИсточник: {item['source']}"
             await callback.message.answer(text, reply_markup=news_buttons(post_id))
         
         await callback.message.answer("✅ Новости загружены. Выберите действие.")
@@ -207,7 +268,7 @@ async def callback(callback: CallbackQuery):
     elif data == "status":
         await callback.message.answer(
             f"🤖 <b>Статус Нико</b>\n\n"
-            f"🧠 AI: SambaNova\n"
+            f"🧠 AI: Google Gemini 3.5 Flash\n"
             f"📡 RSS: {len(RSS_SOURCES)}\n"
             f"📰 В очереди: {len(pending_posts)}\n"
             f"🔄 Авто: каждые 2 часа"
@@ -279,7 +340,7 @@ async def web_server():
 # ========== ЗАПУСК ==========
 async def main():
     asyncio.create_task(web_server())
-    logger.info("🚀 Нико на SambaNova запущен!")
+    logger.info("🚀 Нико на Google Gemini запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
