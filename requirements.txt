@@ -4,5 +4,5 @@ apscheduler==3.10.4
 python-dotenv==1.0.1
 google-genai==2.12.1
 aiohttp==3.9.5
-news-fetch==0.1.0
+newspaper4k==0.2.8
 trafilatura==1.12.0
