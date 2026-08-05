@@ -3,6 +3,7 @@ import logging
 import os
 import feedparser
 from datetime import datetime
+import requests
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -14,14 +15,13 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web, ClientSession, ClientTimeout
-import json
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
-AGNES_API_KEY = os.getenv("AGNES_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,11 +29,11 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# ========== AI КЛИЕНТ (Agnes через OpenAI SDK) ==========
-agnes = AsyncOpenAI(
-    base_url="https://apihub.agnes-ai.com/v1",
-    api_key=AGNES_API_KEY,
-    timeout=ClientTimeout(total=120)
+# ========== AI КЛИЕНТ (OpenRouter) ==========
+openrouter = AsyncOpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+    timeout=ClientTimeout(total=60)
 )
 
 # ========== FSM ==========
@@ -64,16 +64,16 @@ async def fetch_news():
             logger.error(f"RSS error: {e}")
     return news[:8]
 
-# ========== AI ФУНКЦИИ ==========
+# ========== AI ФУНКЦИИ (OpenRouter) ==========
 SYSTEM_PROMPT = """Ты — Нико, голос канала RedRace.
 Пиши новости коротко, ёмко, с драйвом. Используй эмодзи (1-2).
 Без маркдауна, без воды, только факты и контекст.
 Создан командой P4/9."""
 
-async def ask_agnes(prompt: str, system: str = SYSTEM_PROMPT) -> str:
+async def ask_openrouter(prompt: str, system: str = SYSTEM_PROMPT) -> str:
     try:
-        resp = await agnes.chat.completions.create(
-            model="agnes-2.5-flash",
+        resp = await openrouter.chat.completions.create(
+            model="openrouter/free",  # бесплатная модель
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt}
@@ -86,58 +86,10 @@ async def ask_agnes(prompt: str, system: str = SYSTEM_PROMPT) -> str:
         logger.error(f"AI error: {e}")
         return None
 
-async def generate_image(prompt: str) -> str:
-    try:
-        resp = await agnes.images.generate(
-            model="agnes-image-2.1-flash",
-            prompt=prompt,
-            size="1024x768",
-            n=1
-        )
-        return resp.data[0].url
-    except Exception as e:
-        logger.error(f"Image error: {e}")
-        return None
-
-async def generate_video(prompt: str) -> str:
-    async with ClientSession() as session:
-        headers = {"Authorization": f"Bearer {AGNES_API_KEY}"}
-        data = {
-            "model": "agnes-video-v2.0",
-            "prompt": prompt,
-            "num_frames": 121,
-            "frame_rate": 24,
-            "width": 1152,
-            "height": 768
-        }
-        try:
-            async with session.post("https://apihub.agnes-ai.com/v1/videos", headers=headers, json=data) as resp:
-                if resp.status != 200:
-                    return None
-                result = await resp.json()
-                video_id = result.get("video_id")
-                if not video_id:
-                    return None
-
-            for _ in range(30):
-                await asyncio.sleep(5)
-                async with session.get(f"https://apihub.agnes-ai.com/agnesapi?video_id={video_id}", headers=headers) as resp:
-                    if resp.status != 200:
-                        continue
-                    status_data = await resp.json()
-                    if status_data.get("status") == "completed":
-                        return status_data.get("video_url")
-            return None
-        except Exception as e:
-            logger.error(f"Video error: {e}")
-            return None
-
 # ========== ИНТЕРФЕЙС ==========
 def admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📰 Новости", callback_data="publish")],
-        [InlineKeyboardButton(text="🖼️ Картинка", callback_data="image")],
-        [InlineKeyboardButton(text="🎬 Видео", callback_data="video")],
         [InlineKeyboardButton(text="📊 Статус", callback_data="status")],
     ])
 
@@ -146,7 +98,8 @@ def admin_menu():
 async def start(message: Message):
     await message.answer(
         "👋 <b>Нико — редактор RedRace</b>\n\n"
-        "Использует <b>Agnes AI</b>.\n"
+        "Использует <b>OpenRouter</b> (бесплатно).\n"
+        "Просто напиши мне что-нибудь — я отвечу.\n\n"
         "/admin — управление"
     )
 
@@ -157,9 +110,25 @@ async def admin(message: Message):
         return
     await message.answer("🔧 Админ-панель", reply_markup=admin_menu())
 
+# ========== ОБРАБОТКА ЛЮБЫХ СООБЩЕНИЙ ==========
+@dp.message(F.text)
+async def chat_reply(message: Message):
+    if message.text.startswith('/'):
+        return
+    
+    await bot.send_chat_action(message.chat.id, "typing")
+    reply = await ask_openrouter(
+        message.text,
+        "Ты — Нико, голос канала RedRace. Отвечай дружелюбно, коротко и по делу. Используй эмодзи."
+    )
+    if reply:
+        await message.answer(reply)
+    else:
+        await message.answer("❌ Не удалось обработать запрос.")
+
 # ========== КОЛБЭКИ ==========
 @dp.callback_query()
-async def callback(callback: CallbackQuery, state: FSMContext):
+async def callback(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Нет доступа.", show_alert=True)
         return
@@ -172,54 +141,21 @@ async def callback(callback: CallbackQuery, state: FSMContext):
             return
         for item in news[:3]:
             prompt = f"Перепиши новость в стиле RedRace:\n\n{item['title']}\n{item['summary']}"
-            text = await ask_agnes(prompt)
+            text = await ask_openrouter(prompt)
             if not text:
                 text = f"📰 {item['title']}\n\n{item['summary']}\n\n<a href='{item['link']}'>Читать полностью</a>"
             await bot.send_message(CHANNEL_ID, text, parse_mode="HTML")
             await asyncio.sleep(0.5)
         await callback.message.answer("✅ Готово!")
 
-    elif callback.data == "image":
-        await callback.message.answer("🖼️ Напиши промпт для картинки (на английском):")
-        await state.set_state(PromptStates.waiting_for_image_prompt)
-        await callback.answer()
-
-    elif callback.data == "video":
-        await callback.message.answer("🎬 Напиши промпт для видео (на английском):")
-        await state.set_state(PromptStates.waiting_for_video_prompt)
-        await callback.answer()
-
     elif callback.data == "status":
         await callback.message.answer(
             f"🤖 <b>Статус</b>\n\n"
-            f"🧠 AI: Agnes 2.5 Flash\n"
-            f"🖼️ Image: Agnes Image 2.1 Flash\n"
-            f"🎬 Video: Agnes Video V2.0\n"
+            f"🧠 AI: OpenRouter (бесплатно)\n"
             f"📡 RSS: {len(RSS_SOURCES)}\n"
             f"🔄 Авто: каждые 2 часа"
         )
         await callback.answer()
-
-# ========== ОБРАБОТКА ПРОМПТОВ ==========
-@dp.message(PromptStates.waiting_for_image_prompt)
-async def handle_image_prompt(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("⏳ Генерирую картинку...")
-    url = await generate_image(message.text)
-    if url:
-        await message.answer_photo(url, caption="🖼️ Сгенерировано Agnes AI")
-    else:
-        await message.answer("❌ Не удалось сгенерировать картинку.")
-
-@dp.message(PromptStates.waiting_for_video_prompt)
-async def handle_video_prompt(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("🎬 Генерирую видео... Это может занять до 30 секунд.")
-    url = await generate_video(message.text)
-    if url:
-        await message.answer(url, caption="🎬 Сгенерировано Agnes AI")
-    else:
-        await message.answer("❌ Не удалось сгенерировать видео.")
 
 # ========== АВТО-ПУБЛИКАЦИЯ ==========
 async def auto_publish():
@@ -229,7 +165,7 @@ async def auto_publish():
         return
     for item in news[:2]:
         prompt = f"Перепиши новость в стиле RedRace:\n\n{item['title']}\n{item['summary']}"
-        text = await ask_agnes(prompt)
+        text = await ask_openrouter(prompt)
         if not text:
             text = f"📰 {item['title']}\n\n{item['summary']}\n\n<a href='{item['link']}'>Читать полностью</a>"
         await bot.send_message(CHANNEL_ID, text, parse_mode="HTML")
@@ -255,7 +191,7 @@ async def web_server():
 # ========== ЗАПУСК ==========
 async def main():
     asyncio.create_task(web_server())
-    logger.info("🚀 Нико с Agnes AI запущен!")
+    logger.info("🚀 Нико на OpenRouter запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
